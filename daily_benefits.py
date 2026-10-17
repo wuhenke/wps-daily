@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-new Env('WPS澶╁ぉ棰嗙鍒?);
+new Env('WPS天天领福利');
 cron: 1 1 1 1 1
 """
 
 """
-WPS 澶╁ぉ棰嗙鍒╂椿鍔ㄨ剼鏈?
-褰撳墠鏀寔锛?- 鑷姩鍙戠幇鈥滅鍒╀腑蹇冣€濇椿鍔ㄥ叆鍙?- 鑷姩鑾峰彇椤甸潰娲诲姩淇℃伅
-- 鑷姩鎵ц鎵撳崱鍏嶈垂棰嗕細鍛?- 鑷姩鍙備笌浼氬憳鍏嶈垂璇曠敤鐢宠
-- 鑷姩鎵ц澶╁ぉ鎶藉
+WPS 天天领福利活动脚本
+
+当前支持：
+- 自动发现“福利中心”活动入口
+- 自动获取页面活动信息
+- 自动执行打卡免费领会员
+- 自动参与会员免费试用申请
+- 自动执行天天抽奖
 
 Author: Assistant
 Date: 2026-03-11
@@ -26,7 +30,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-# 鑾峰彇椤圭洰鏍圭洰褰?project_root = Path(__file__).resolve().parent.parent.parent
+# 获取项目根目录
+project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from logging_utils import (
@@ -40,13 +45,16 @@ from notification import send_notification, NotificationSound
 
 
 class DailyBenefitsAPI:
-    """WPS 澶╁ぉ棰嗙鍒╂椿鍔ㄦ帴鍙ｅ皝瑁?""
+    """WPS 天天领福利活动接口封装"""
 
     MARKET_ACTIVITY_URL = "https://tiance.wps.cn/dce/exec/api/market/activity"
     PAGE_INFO_URL = "https://personal-act.wps.cn/activity-rubik/activity/page_info"
     COMPONENT_ACTION_URL = "https://personal-act.wps.cn/activity-rubik/activity/component_action"
 
-    # 渚濇鏌ヨ澶氫釜钀ラ攢娓犻亾骞跺悎骞跺叆鍙ｅ€欓€夛紝闈犲墠鐨勬笭閬撲紭鍏堢骇鏇撮珮銆?    # AUTOPCHYZXYYHD3737: PC 浼氬憳涓績杩愯惀娲诲姩鑱氬悎浣嶏紝鏃犻渶鐧诲綍鍗冲彲绋冲畾杩斿洖绂忓埄鍏ュ彛銆?    # HYGW5004,GWHD5002: 鏃ф笭閬擄紝浣滀负鍏滃簳锛堥儴鍒嗚处鍙风櫥褰曟€佷笅浠嶄細杩斿洖鍏ュ彛锛夈€?    MARKET_ACTIVITY_CHANNELS = [
+    # 依次查询多个营销渠道并合并入口候选，靠前的渠道优先级更高。
+    # AUTOPCHYZXYYHD3737: PC 会员中心运营活动聚合位，无需登录即可稳定返回福利入口。
+    # HYGW5004,GWHD5002: 旧渠道，作为兜底（部分账号登录态下仍会返回入口）。
+    MARKET_ACTIVITY_CHANNELS = [
         {
             "channel_code": "AUTOPCHYZXYYHD3737",
             "platform": 8,
@@ -62,8 +70,10 @@ class DailyBenefitsAPI:
         }
     ]
 
-    # 鍏ュ彛鍒ゅ畾渚濇嵁娲诲姩閾炬帴 query 涓殑 position 鍙傛暟锛岀鍒╀腑蹇冨浐瀹氫负 pc_nvc_activity_fuli銆?    # 閫変腑浼樺厛绾э細position 绮剧‘鍛戒腑 > position 鍚?fuli > 鏍囬鍛戒腑銆?    TARGET_POSITIONS = ("pc_nvc_activity_fuli",)
-    TARGET_TITLES = {"绂忓埄涓績", "澶╁ぉ棰嗙鍒?}
+    # 入口判定依据活动链接 query 中的 position 参数，福利中心固定为 pc_nvc_activity_fuli。
+    # 选中优先级：position 精确命中 > position 含 fuli > 标题命中。
+    TARGET_POSITIONS = ("pc_nvc_activity_fuli",)
+    TARGET_TITLES = {"福利中心", "天天领福利"}
 
     def __init__(self, cookies: str, user_agent: Optional[str] = None):
         self.cookies = self._parse_cookies(cookies)
@@ -90,7 +100,7 @@ class DailyBenefitsAPI:
 
     @staticmethod
     def _parse_cookies(cookie_str: str) -> Dict[str, str]:
-        """灏?Cookie 瀛楃涓茶В鏋愪负瀛楀吀"""
+        """将 Cookie 字符串解析为字典"""
         cookies: Dict[str, str] = {}
         for item in cookie_str.split("; "):
             if "=" in item:
@@ -100,12 +110,12 @@ class DailyBenefitsAPI:
 
     @staticmethod
     def _extract_error_message(result: Dict[str, Any]) -> str:
-        """浠庤繑鍥炵粨鏋滀腑鎻愬彇閿欒娑堟伅"""
-        return result.get("msg") or result.get("message") or result.get("error") or "鏈煡閿欒"
+        """从返回结果中提取错误消息"""
+        return result.get("msg") or result.get("message") or result.get("error") or "未知错误"
 
     @staticmethod
     def _normalize_server_time(server_time: Any) -> int:
-        """鍏煎绉掑拰姣鏃堕棿鎴炽€?""
+        """兼容秒和毫秒时间戳。"""
         try:
             timestamp = int(server_time)
         except (TypeError, ValueError):
@@ -117,7 +127,7 @@ class DailyBenefitsAPI:
 
     @classmethod
     def _resolve_sign_date(cls, item: Dict[str, Any], sign_records: List[Dict[str, Any]]) -> str:
-        """浼樺厛浣跨敤鏈嶅姟绔椂闂存帹瀵肩鍒版棩鏈燂紝缂哄け鏃跺洖閫€鍒拌褰曚腑鐨勬渶鏂版棩鏈熴€?""
+        """优先使用服务端时间推导签到日期，缺失时回退到记录中的最新日期。"""
         server_time = cls._normalize_server_time(item.get("server_time", 0))
         if server_time:
             return time.strftime("%Y-%m-%d", time.localtime(server_time))
@@ -133,12 +143,12 @@ class DailyBenefitsAPI:
 
     @staticmethod
     def _count_signed_days(sign_records: List[Dict[str, Any]]) -> int:
-        """缁熻褰撳墠绯诲垪宸茬鍒板ぉ鏁般€?""
+        """统计当前系列已签到天数。"""
         return sum(1 for record in sign_records if record.get("sign_status") == "signed")
 
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
-        """灏嗘帴鍙ｈ繑鍥炵殑鏁板瓧瀛楁瀹夊叏杞负 int銆?""
+        """将接口返回的数字字段安全转为 int。"""
         try:
             return int(value)
         except (TypeError, ValueError):
@@ -146,10 +156,10 @@ class DailyBenefitsAPI:
 
     @staticmethod
     def _is_auth_expired_message(message: str) -> bool:
-        keywords = ("Token宸茶繃鏈?, "ErrNotLogin", "userNotLogin", "鏈櫥褰?, "璇烽噸鏂扮櫥褰?)
+        keywords = ("Token已过期", "ErrNotLogin", "userNotLogin", "未登录", "请重新登录")
         return any(keyword in str(message) for keyword in keywords)
 
-    def _build_failure_result(self, payload: Dict[str, Any], default_error: str = "鏈煡閿欒") -> Dict[str, Any]:
+    def _build_failure_result(self, payload: Dict[str, Any], default_error: str = "未知错误") -> Dict[str, Any]:
         error_message = self._extract_error_message(payload) or default_error
         result = {
             "success": False,
@@ -172,7 +182,7 @@ class DailyBenefitsAPI:
         params: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """缁熶竴璇锋眰鍏ュ彛"""
+        """统一请求入口"""
         request_headers = self.base_headers.copy()
         if headers:
             request_headers.update(headers)
@@ -195,16 +205,16 @@ class DailyBenefitsAPI:
         except requests.exceptions.RequestException as exc:
             return {
                 "success": False,
-                "error": f"缃戠粶璇锋眰澶辫触: {exc}"
+                "error": f"网络请求失败: {exc}"
             }
         except ValueError as exc:
             return {
                 "success": False,
-                "error": f"鍝嶅簲瑙ｆ瀽澶辫触: {exc}"
+                "error": f"响应解析失败: {exc}"
             }
 
     def get_market_activity(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """鑾峰彇鍗曚釜娓犻亾鐨勫競鍦烘椿鍔ㄦ暟鎹?""
+        """获取单个渠道的市场活动数据"""
         request_payload = payload if payload is not None else self.MARKET_ACTIVITY_CHANNELS[0]
         result = self._request(
             "POST",
@@ -230,7 +240,7 @@ class DailyBenefitsAPI:
         }
 
     def get_benefit_portal(self) -> Dict[str, Any]:
-        """璺ㄥ涓惀閿€娓犻亾鍙戠幇骞堕€変腑銆屽ぉ澶╅绂忓埄銆嶆椿鍔ㄥ叆鍙?""
+        """跨多个营销渠道发现并选中「天天领福利」活动入口"""
         raw_candidates: List[Dict[str, str]] = []
         channel_errors: List[str] = []
         auth_expired = False
@@ -239,7 +249,7 @@ class DailyBenefitsAPI:
             channel_code = channel_payload.get("channel_code", "")
             market_result = self.get_market_activity(channel_payload)
             if not market_result["success"]:
-                channel_errors.append(f"{channel_code}: {market_result.get('error', '鏈煡閿欒')}")
+                channel_errors.append(f"{channel_code}: {market_result.get('error', '未知错误')}")
                 if market_result.get("error_type") == "token_expired":
                     auth_expired = True
                 continue
@@ -247,19 +257,19 @@ class DailyBenefitsAPI:
 
         parsed_candidates = self._parse_portal_candidates(raw_candidates)
         self.logger.info(
-            "鍏ュ彛鍙戠幇锛氭敹闆嗗埌 %s 涓摼鎺ワ紝鍘婚噸鍚?%s 涓叆鍙?,
+            "入口发现：收集到 %s 个链接，去重后 %s 个入口",
             len(raw_candidates),
             len(parsed_candidates),
-            extra={"step": "鍏ュ彛鍙戠幇"}
+            extra={"step": "入口发现"}
         )
 
         if not parsed_candidates:
-            failure = {"success": False, "error": "鏈壘鍒扮鍒╀腑蹇冩椿鍔ㄥ叆鍙?}
+            failure = {"success": False, "error": "未找到福利中心活动入口"}
             if auth_expired:
                 failure["error_type"] = "token_expired"
             elif channel_errors:
                 failure["error"] = (
-                    f"鏈壘鍒扮鍒╀腑蹇冩椿鍔ㄥ叆鍙ｏ紙娓犻亾璇锋眰澶辫触: {'; '.join(channel_errors)}锛?
+                    f"未找到福利中心活动入口（渠道请求失败: {'; '.join(channel_errors)}）"
                 )
             return failure
 
@@ -273,14 +283,14 @@ class DailyBenefitsAPI:
             return {
                 "success": False,
                 "error": (
-                    "鏈尮閰嶅埌绂忓埄涓績鍏ュ彛锛堟湡鏈?position=pc_nvc_activity_fuli锛?
-                    f"锛屽疄闄呭彂鐜? {', '.join(found_positions) or '鏃?position'}"
+                    "未匹配到福利中心入口（期望 position=pc_nvc_activity_fuli）"
+                    f"，实际发现: {', '.join(found_positions) or '无 position'}"
                 )
             }
         return selected
 
     def _parse_portal_candidates(self, raw_candidates: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-        """瑙ｆ瀽鍊欓€夐摼鎺ュ苟鎸?activity/page 鍘婚噸锛岄檮甯?position/title銆?""
+        """解析候选链接并按 activity/page 去重，附带 position/title。"""
         parsed: List[Dict[str, Any]] = []
         seen: set = set()
         for candidate in raw_candidates:
@@ -300,7 +310,7 @@ class DailyBenefitsAPI:
         return parsed
 
     def _select_benefit_portal(self, parsed_candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """鎸?position 绮剧‘鍛戒腑 > position 鍚?fuli > 鏍囬鍛戒腑 鐨勯『搴忛€変腑绂忓埄鍏ュ彛銆?""
+        """按 position 精确命中 > position 含 fuli > 标题命中 的顺序选中福利入口。"""
         for candidate in parsed_candidates:
             if candidate.get("position") in self.TARGET_POSITIONS:
                 return candidate
@@ -316,7 +326,7 @@ class DailyBenefitsAPI:
         return None
 
     def _collect_portal_candidates(self, node: Any, candidates: List[Dict[str, str]]) -> None:
-        """閫掑綊鏀堕泦鍖呭惈 portal 閾炬帴鐨勬椿鍔ㄥ叆鍙ｏ紙涓嶅啀瑕佹眰鑺傜偣甯?title锛?""
+        """递归收集包含 portal 链接的活动入口（不再要求节点带 title）"""
         if isinstance(node, dict):
             link = node.get("link")
             if isinstance(link, str) and "/rubik2/portal/" in link:
@@ -335,7 +345,7 @@ class DailyBenefitsAPI:
                 self._collect_portal_candidates(item, candidates)
 
     def _parse_portal_link(self, link: str) -> Dict[str, Any]:
-        """瑙ｆ瀽娲诲姩 portal 閾炬帴"""
+        """解析活动 portal 链接"""
         try:
             parsed = urlparse(link)
             path_parts = [part for part in parsed.path.split("/") if part]
@@ -361,12 +371,12 @@ class DailyBenefitsAPI:
         except (ValueError, IndexError) as exc:
             return {
                 "success": False,
-                "error": f"娲诲姩閾炬帴瑙ｆ瀽澶辫触: {exc}"
+                "error": f"活动链接解析失败: {exc}"
             }
 
     def get_page_info(self, portal_info: Dict[str, Any]) -> Dict[str, Any]:
-        """鑾峰彇椤甸潰鍏ㄩ儴娲诲姩淇℃伅"""
-        self.logger.info("鑾峰彇椤甸潰娲诲姩淇℃伅", extra={"step": "椤甸潰淇℃伅"})
+        """获取页面全部活动信息"""
+        self.logger.info("获取页面活动信息", extra={"step": "页面信息"})
         activity_number = portal_info["activity_number"]
         page_number = portal_info["page_number"]
         filter_params = portal_info.get("filter_params", {})
@@ -400,7 +410,7 @@ class DailyBenefitsAPI:
         }
 
     def get_member_trial_info(self, page_info: Dict[str, Any]) -> Dict[str, Any]:
-        """浠庢€绘椿鍔ㄨ繑鍥炴暟鎹腑鎻愬彇浼氬憳鍏嶈垂璇曠敤妯″潡"""
+        """从总活动返回数据中提取会员免费试用模块"""
         data_list = page_info.get("data", [])
         fallback_item: Optional[Dict[str, Any]] = None
 
@@ -419,7 +429,7 @@ class DailyBenefitsAPI:
             if fallback_item is None:
                 fallback_item = item
 
-            if any("浼氬憳" in str(detail.get("title", "")) for detail in details):
+            if any("会员" in str(detail.get("title", "")) for detail in details):
                 return {
                     "success": True,
                     "component_number": item.get("number", ""),
@@ -446,7 +456,7 @@ class DailyBenefitsAPI:
 
         return {
             "success": False,
-            "error": "鏈壘鍒颁細鍛樺厤璐硅瘯鐢ㄦā鍧?
+            "error": "未找到会员免费试用模块"
         }
 
     def sign_up_member_trial(
@@ -457,12 +467,12 @@ class DailyBenefitsAPI:
         cycle_id: str,
         session_id: str
     ) -> Dict[str, Any]:
-        """鎵ц浼氬憳鍏嶈垂璇曠敤鐢宠"""
+        """执行会员免费试用申请"""
         csrf_token = self.cookies.get("act_csrf_token") or self.cookies.get("csrf")
         if not csrf_token:
             return {
                 "success": False,
-                "error": "Cookie 涓己灏?act_csrf_token/csrf锛屾棤娉曟彁浜よ瘯鐢ㄧ敵璇?
+                "error": "Cookie 中缺少 act_csrf_token/csrf，无法提交试用申请"
             }
 
         payload = {
@@ -515,7 +525,7 @@ class DailyBenefitsAPI:
 
         failure_result = {
             "success": False,
-            "error": divide_prize.get("reason") or "璇曠敤鐢宠澶辫触",
+            "error": divide_prize.get("reason") or "试用申请失败",
             "data": divide_prize
         }
         if self._is_auth_expired_message(failure_result["error"]):
@@ -523,7 +533,7 @@ class DailyBenefitsAPI:
         return failure_result
 
     def get_fragment_collect_info(self, page_info: Dict[str, Any]) -> Dict[str, Any]:
-        """浠庢€绘椿鍔ㄨ繑鍥炴暟鎹腑鎻愬彇鎵撳崱鍏嶈垂棰嗕細鍛樻ā鍧?""
+        """从总活动返回数据中提取打卡免费领会员模块"""
         data_list = page_info.get("data", [])
         fallback_item: Optional[Dict[str, Any]] = None
 
@@ -589,7 +599,7 @@ class DailyBenefitsAPI:
 
         return {
             "success": False,
-            "error": "鏈壘鍒版墦鍗″厤璐归浼氬憳妯″潡"
+            "error": "未找到打卡免费领会员模块"
         }
 
     def sign_in_fragment_collect(
@@ -601,12 +611,12 @@ class DailyBenefitsAPI:
         sign_series_id: str,
         is_new_sign_series: bool
     ) -> Dict[str, Any]:
-        """鎵ц鎵撳崱鍏嶈垂棰嗕細鍛樼鍒?""
+        """执行打卡免费领会员签到"""
         csrf_token = self.cookies.get("act_csrf_token") or self.cookies.get("csrf")
         if not csrf_token:
             return {
                 "success": False,
-                "error": "Cookie 涓己灏?act_csrf_token/csrf锛屾棤娉曟墽琛屾墦鍗＄鍒?
+                "error": "Cookie 中缺少 act_csrf_token/csrf，无法执行打卡签到"
             }
 
         payload = {
@@ -657,7 +667,7 @@ class DailyBenefitsAPI:
 
         failure_result = {
             "success": False,
-            "error": fragment_collect.get("reason") or "鎵撳崱绛惧埌澶辫触",
+            "error": fragment_collect.get("reason") or "打卡签到失败",
             "data": fragment_collect
         }
         if self._is_auth_expired_message(failure_result["error"]):
@@ -666,7 +676,7 @@ class DailyBenefitsAPI:
 
     @staticmethod
     def _pick_lottery_session(lottery_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """浼樺厛鎸戦€夎繘琛屼腑鐨勬娊濂栧満娆?""
+        """优先挑选进行中的抽奖场次"""
         for session in lottery_list:
             if (
                 session.get("session_status") == "IN_PROGRESS"
@@ -681,7 +691,7 @@ class DailyBenefitsAPI:
         return lottery_list[0] if lottery_list else None
 
     def get_daily_lottery_info(self, page_info: Dict[str, Any]) -> Dict[str, Any]:
-        """浠庢€绘椿鍔ㄨ繑鍥炴暟鎹腑鎻愬彇澶╁ぉ鎶藉妯″潡"""
+        """从总活动返回数据中提取天天抽奖模块"""
         data_list = page_info.get("data", [])
         fallback_item: Optional[Dict[str, Any]] = None
         fallback_session: Optional[Dict[str, Any]] = None
@@ -743,7 +753,7 @@ class DailyBenefitsAPI:
 
         return {
             "success": False,
-            "error": "鏈壘鍒板ぉ澶╂娊濂栨ā鍧?
+            "error": "未找到天天抽奖模块"
         }
 
     def exec_daily_lottery(
@@ -753,12 +763,12 @@ class DailyBenefitsAPI:
         component_node_id: str,
         session_id: Any
     ) -> Dict[str, Any]:
-        """鎵ц澶╁ぉ鎶藉"""
+        """执行天天抽奖"""
         csrf_token = self.cookies.get("act_csrf_token") or self.cookies.get("csrf")
         if not csrf_token:
             return {
                 "success": False,
-                "error": "Cookie 涓己灏?act_csrf_token/csrf锛屾棤娉曟墽琛屾娊濂?
+                "error": "Cookie 中缺少 act_csrf_token/csrf，无法执行抽奖"
             }
 
         payload = {
@@ -801,7 +811,7 @@ class DailyBenefitsAPI:
         if lottery_v2.get("success"):
             return {
                 "success": True,
-                "reward_name": lottery_v2.get("reward_name", "鏈煡濂栧搧"),
+                "reward_name": lottery_v2.get("reward_name", "未知奖品"),
                 "reward_type": lottery_v2.get("reward_type", ""),
                 "reward_id": lottery_v2.get("reward_id", 0),
                 "order_id": lottery_v2.get("order_id", ""),
@@ -811,7 +821,7 @@ class DailyBenefitsAPI:
 
         failure_result = {
             "success": False,
-            "error": lottery_v2.get("send_msg") or "鎶藉澶辫触",
+            "error": lottery_v2.get("send_msg") or "抽奖失败",
             "error_code": lottery_v2.get("error_code", 0),
             "data": lottery_v2
         }
@@ -826,12 +836,12 @@ class DailyBenefitsAPI:
         component_node_id: str,
         sign_series_id: str
     ) -> Dict[str, Any]:
-        """棰嗗彇澶╁ぉ绂忓埄绗?7 澶╁鍔?""
+        """领取天天福利第 7 天奖励"""
         csrf_token = self.cookies.get("act_csrf_token") or self.cookies.get("csrf")
         if not csrf_token:
             return {
                 "success": False,
-                "error": "Cookie 涓己灏?act_csrf_token/csrf锛屾棤娉曢鍙栫7澶╁鍔?
+                "error": "Cookie 中缺少 act_csrf_token/csrf，无法领取第7天奖励"
             }
 
         payload = {
@@ -886,7 +896,7 @@ class DailyBenefitsAPI:
             action_data.get("reason")
             or action_data.get("send_msg")
             or action_data.get("message")
-            or "棰嗗彇绗?澶╁鍔卞け璐?
+            or "领取第7天奖励失败"
         )
         failure_result = {
             "success": False,
@@ -906,9 +916,9 @@ class DailyBenefitsAPI:
 
 
 class DailyBenefitsTasks:
-    """澶╁ぉ棰嗙鍒╂椿鍔ㄤ换鍔℃墽琛屽櫒"""
+    """天天领福利活动任务执行器"""
 
-    page_name = "澶╁ぉ棰嗙鍒?
+    page_name = "天天领福利"
 
     def __init__(self, config_path: str = None, enable_notification: bool = True, load_accounts: bool = True):
         if config_path is None:
@@ -929,48 +939,48 @@ class DailyBenefitsTasks:
 
     @staticmethod
     def _is_auth_expired_message(message: str) -> bool:
-        keywords = ("Token宸茶繃鏈?, "ErrNotLogin", "userNotLogin", "鏈櫥褰?, "璇烽噸鏂扮櫥褰?)
+        keywords = ("Token已过期", "ErrNotLogin", "userNotLogin", "未登录", "请重新登录")
         return any(keyword in str(message) for keyword in keywords)
 
     @staticmethod
     def _is_broken_series_error(message: str) -> bool:
-        """鍒ゆ柇鎵撳崱澶辫触鏄惁鍥犳棫 series 鏂/杩囨湡锛堥渶瑕侀噸鏂板紑鍚鍒帮級銆?""
+        """判断打卡失败是否因旧 series 断签/过期（需要重新开启签到）。"""
         text = str(message).lower()
         return "not in series" in text or "series records" in text
 
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
-        """灏嗘帴鍙ｈ繑鍥炵殑鏁板瓧瀛楁瀹夊叏杞负 int銆?""
+        """将接口返回的数字字段安全转为 int。"""
         try:
             return int(value)
         except (TypeError, ValueError):
             return default
 
     def _init_accounts(self) -> None:
-        """璇诲彇 WPS 璐﹀彿閰嶇疆"""
+        """读取 WPS 账号配置"""
         if not self.config_path.exists():
-            raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {self.config_path}")
+            raise FileNotFoundError(f"配置文件不存在: {self.config_path}")
 
         try:
             with open(self.config_path, "r", encoding="utf-8") as file:
                 config_data = json.load(file)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"閰嶇疆鏂囦欢 JSON 瑙ｆ瀽澶辫触: {exc}") from exc
+            raise ValueError(f"配置文件 JSON 解析失败: {exc}") from exc
 
         wps_config = config_data.get("wps", {})
         self.accounts = wps_config.get("accounts", [])
 
         if self.accounts:
-            self.logger.info(f"鎴愬姛鍔犺浇 {len(self.accounts)} 涓?WPS 璐﹀彿")
+            self.logger.info(f"成功加载 {len(self.accounts)} 个 WPS 账号")
         else:
-            self.logger.warning("閰嶇疆鏂囦欢涓病鏈夋壘鍒?WPS 璐﹀彿淇℃伅")
+            self.logger.warning("配置文件中没有找到 WPS 账号信息")
 
     @staticmethod
     def _sync_free_member_checkin_state(
         free_member_checkin: Dict[str, Any],
         fragment_result: Dict[str, Any]
     ) -> None:
-        """灏嗛〉闈㈡渶鏂扮鍒扮姸鎬佸洖濉埌姹囨€荤粨鏋溿€?""
+        """将页面最新签到状态回填到汇总结果。"""
         today_record = fragment_result.get("today_record", {})
         free_member_checkin["sign_date"] = fragment_result.get("sign_date", "")
         free_member_checkin["sign_status"] = today_record.get("sign_status", "")
@@ -984,24 +994,24 @@ class DailyBenefitsTasks:
         *,
         signed_now: bool = False
     ) -> str:
-        """缁熶竴鐢熸垚鎵撳崱鍏嶈垂棰嗕細鍛樻ā鍧楁枃妗堛€?""
+        """统一生成打卡免费领会员模块文案。"""
         sign_date = free_member_checkin.get("sign_date", "")
         signed_days = free_member_checkin.get("signed_days", 0)
         reward_title = free_member_checkin.get("reward_title", "")
         sign_status = free_member_checkin.get("sign_status", "")
 
         if sign_status == "signed":
-            day_text = f"杩炵画绗?{signed_days} 澶? if signed_days else sign_date
-            reward_text = f"锛屽鍔? {reward_title}" if reward_title else ""
+            day_text = f"连续第 {signed_days} 天" if signed_days else sign_date
+            reward_text = f"，奖励: {reward_title}" if reward_title else ""
             if signed_now:
-                return f"鎵撳崱鍏嶈垂棰嗕細鍛樼鍒版垚鍔燂紝{day_text}锛坽sign_date}锛墈reward_text}"
-            return f"鎵撳崱鍏嶈垂棰嗕細鍛樹粖鏃ュ凡绛惧埌锛寋day_text}锛坽sign_date}锛墈reward_text}"
+                return f"打卡免费领会员签到成功，{day_text}（{sign_date}）{reward_text}"
+            return f"打卡免费领会员今日已签到，{day_text}（{sign_date}）{reward_text}"
 
-        return f"鎵撳崱鍏嶈垂棰嗕細鍛樺緟绛惧埌锛坽sign_date}锛?
+        return f"打卡免费领会员待签到（{sign_date}）"
 
     @staticmethod
     def _summarize_lottery_item(index: int, item: Dict[str, Any]) -> Dict[str, Any]:
-        """鎻愬彇 lottery_v2 涓敤浜庢帓鏌ョ鍒?棰嗗彇椤哄簭鐨勫畨鍏ㄥ瓧娈点€?""
+        """提取 lottery_v2 中用于排查签到/领取顺序的安全字段。"""
         lottery_v2 = item.get("lottery_v2") or {}
         lottery_list = lottery_v2.get("lottery_list") or []
         return {
@@ -1031,7 +1041,7 @@ class DailyBenefitsTasks:
 
     @staticmethod
     def _summarize_fragment_item(index: int, item: Dict[str, Any]) -> Dict[str, Any]:
-        """鎻愬彇 fragment_collect 涓敤浜庢帓鏌ョ鍒?棰嗗彇椤哄簭鐨勫畨鍏ㄥ瓧娈点€?""
+        """提取 fragment_collect 中用于排查签到/领取顺序的安全字段。"""
         fragment_collect = item.get("fragment_collect") or {}
         sign_records = fragment_collect.get("sign_records") or []
         return {
@@ -1059,7 +1069,7 @@ class DailyBenefitsTasks:
         fragment_result: Optional[Dict[str, Any]] = None,
         lottery_result: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """鐢熸垚涓嶅惈 Cookie/Token 鐨勯〉闈㈢姸鎬佽瘖鏂憳瑕併€?""
+        """生成不含 Cookie/Token 的页面状态诊断摘要。"""
         data_list = page_info.get("data", [])
         if not isinstance(data_list, list):
             data_list = []
@@ -1112,7 +1122,7 @@ class DailyBenefitsTasks:
 
     @staticmethod
     def _format_diagnostics(diagnostics: Dict[str, Any]) -> str:
-        """鏍煎紡鍖栬瘖鏂憳瑕侊紝淇濇寔鏃ュ織鍗曡杈撳嚭銆?""
+        """格式化诊断摘要，保持日志单行输出。"""
         return json.dumps(diagnostics, ensure_ascii=False, default=str, separators=(",", ":"))
 
     def _process_member_trial(
@@ -1123,8 +1133,8 @@ class DailyBenefitsTasks:
         account_name: str,
         result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """澶勭悊浼氬憳鍏嶈垂璇曠敤妯″潡"""
-        trial_logger = bind_logger(self.logger, account=account_name, step="浼氬憳璇曠敤")
+        """处理会员免费试用模块"""
+        trial_logger = bind_logger(self.logger, account=account_name, step="会员试用")
         member_trial_result = api.get_member_trial_info(page_info)
         if not member_trial_result["success"]:
             message = member_trial_result["error"]
@@ -1152,7 +1162,7 @@ class DailyBenefitsTasks:
         ]
 
         if join_reach_limit:
-            message = "浼氬憳鍏嶈垂璇曠敤浠婃棩鐢宠娆℃暟宸茶揪涓婇檺"
+            message = "会员免费试用今日申请次数已达上限"
             result["member_trial"]["message"] = message
             return {
                 "success": True,
@@ -1160,7 +1170,7 @@ class DailyBenefitsTasks:
             }
 
         if remain_times <= 0:
-            message = "浼氬憳鍏嶈垂璇曠敤鏃犲墿浣欑敵璇锋鏁?
+            message = "会员免费试用无剩余申请次数"
             result["member_trial"]["message"] = message
             return {
                 "success": True,
@@ -1168,7 +1178,7 @@ class DailyBenefitsTasks:
             }
 
         if not candidates:
-            message = "浼氬憳鍏嶈垂璇曠敤宸插叏閮ㄧ敵璇凤紝鏃犻渶閲嶅鎻愪氦"
+            message = "会员免费试用已全部申请，无需重复提交"
             result["member_trial"]["message"] = message
             return {
                 "success": True,
@@ -1177,7 +1187,7 @@ class DailyBenefitsTasks:
 
         selected_candidates = candidates[:remain_times]
         trial_logger.info(
-            "鍓╀綑鐢宠娆℃暟=%s锛屾湰娆″噯澶囩敵璇?%s 椤?,
+            "剩余申请次数=%s，本次准备申请=%s 项",
             remain_times,
             len(selected_candidates)
         )
@@ -1185,13 +1195,13 @@ class DailyBenefitsTasks:
         for index, candidate in enumerate(selected_candidates, start=1):
             if index > 1:
                 delay = random.uniform(1, 2)
-                trial_logger.info("绛夊緟 %.1f 绉掑悗缁х画鐢宠", delay)
+                trial_logger.info("等待 %.1f 秒后继续申请", delay)
                 time.sleep(delay)
 
             trial_logger.info(
-                "姝ｅ湪鐢宠绗?%s 椤? %s",
+                "正在申请第 %s 项: %s",
                 index,
-                candidate.get("title", "鏈煡璇曠敤")
+                candidate.get("title", "未知试用")
             )
             sign_up_result = api.sign_up_member_trial(
                 portal_info=portal_result,
@@ -1206,39 +1216,39 @@ class DailyBenefitsTasks:
                 "session_id": candidate.get("session_id", ""),
                 "cycle_id": candidate.get("cycle_id", ""),
                 "success": sign_up_result["success"],
-                "message": sign_up_result.get("reason") or sign_up_result.get("error") or "鐢宠鎴愬姛"
+                "message": sign_up_result.get("reason") or sign_up_result.get("error") or "申请成功"
             }
             result["member_trial"]["attempts"].append(attempt)
 
             if sign_up_result["success"]:
-                trial_logger.info("%s 鐢宠鎴愬姛", attempt["title"])
+                trial_logger.info("%s 申请成功", attempt["title"])
             else:
-                trial_logger.error("%s 鐢宠澶辫触: %s", attempt["title"], attempt["message"])
+                trial_logger.error("%s 申请失败: %s", attempt["title"], attempt["message"])
                 if (
                     sign_up_result.get("error_type") == "token_expired"
                     or self._is_auth_expired_message(attempt["message"])
                 ):
                     result["auth_expired"] = True
-                    result["member_trial"]["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+                    result["member_trial"]["message"] = "Token已过期，请重新登录"
                     return {
                         "success": False,
-                        "message": "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+                        "message": "Token已过期，请重新登录"
                     }
 
         success_count = sum(1 for attempt in result["member_trial"]["attempts"] if attempt["success"])
         total_attempts = len(result["member_trial"]["attempts"])
 
         if total_attempts == 0:
-            message = "鏈墽琛屼細鍛樺厤璐硅瘯鐢ㄧ敵璇?
+            message = "未执行会员免费试用申请"
             success = True
         elif success_count == total_attempts:
-            message = f"浼氬憳鍏嶈垂璇曠敤鐢宠瀹屾垚锛屾垚鍔?{success_count} 椤?
+            message = f"会员免费试用申请完成，成功 {success_count} 项"
             success = True
         elif success_count > 0:
-            message = f"浼氬憳鍏嶈垂璇曠敤鐢宠閮ㄥ垎鎴愬姛锛屾垚鍔?{success_count}/{total_attempts} 椤?
+            message = f"会员免费试用申请部分成功，成功 {success_count}/{total_attempts} 项"
             success = True
         else:
-            message = f"浼氬憳鍏嶈垂璇曠敤鐢宠澶辫触锛屽叡灏濊瘯 {total_attempts} 椤?
+            message = f"会员免费试用申请失败，共尝试 {total_attempts} 项"
             success = False
 
         result["member_trial"]["message"] = message
@@ -1255,8 +1265,8 @@ class DailyBenefitsTasks:
         account_name: str,
         result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """澶勭悊鎵撳崱鍏嶈垂棰嗕細鍛樻ā鍧?""
-        checkin_logger = bind_logger(self.logger, account=account_name, step="鎵撳崱绛惧埌")
+        """处理打卡免费领会员模块"""
+        checkin_logger = bind_logger(self.logger, account=account_name, step="打卡签到")
         fragment_result = api.get_fragment_collect_info(page_info)
         if not fragment_result["success"]:
             message = fragment_result["error"]
@@ -1280,7 +1290,7 @@ class DailyBenefitsTasks:
             }
 
         checkin_logger.info(
-            "寮€濮嬫墽琛屾墦鍗＄鍒帮紝鏃ユ湡=%s, series_id=%s, is_new=%s",
+            "开始执行打卡签到，日期=%s, series_id=%s, is_new=%s",
             fragment_result["sign_date"],
             fragment_result.get("sign_series_id", ""),
             fragment_result.get("is_new_sign_series", True)
@@ -1294,13 +1304,15 @@ class DailyBenefitsTasks:
             is_new_sign_series=fragment_result.get("is_new_sign_series", True)
         )
 
-        # 鏃?series 鏂/杩囨湡锛堟湇鍔＄杩斿洖 "not in series records"锛夋椂锛岃嚜鍔ㄤ互
-        # 鈥滈噸鏂板紑鍚鍒扳€濈殑鍙傛暟閲嶈瘯涓€娆★細sign_date 鐣欑┖ + is_new_sign_series=true锛?        # 鏈嶅姟绔細寮€鍚竴鏉℃柊 series 骞舵妸浠婂ぉ绛句负绗?1 澶╋紙绛変环浜庨〉闈㈡墜鍔ㄧ偣鈥滈噸鏂板紑濮嬧€濓級銆?        if (
+        # 旧 series 断签/过期（服务端返回 "not in series records"）时，自动以
+        # “重新开启签到”的参数重试一次：sign_date 留空 + is_new_sign_series=true，
+        # 服务端会开启一条新 series 并把今天签为第 1 天（等价于页面手动点“重新开始”）。
+        if (
             not sign_in_result["success"]
             and self._is_broken_series_error(sign_in_result.get("error", ""))
         ):
             checkin_logger.info(
-                "妫€娴嬪埌鏃?series 宸茶繃鏈燂紙%s锛夛紝鑷姩閲嶆柊寮€鍚鍒?,
+                "检测到旧 series 已过期（%s），自动重新开启签到",
                 sign_in_result.get("error", "")
             )
             result["free_member_checkin"]["restarted_series"] = True
@@ -1314,7 +1326,7 @@ class DailyBenefitsTasks:
             )
 
         if sign_in_result["success"]:
-            message = "鎵撳崱鍏嶈垂棰嗕細鍛樼鍒版垚鍔燂紝姝ｅ湪鍒锋柊绛惧埌鐘舵€?
+            message = "打卡免费领会员签到成功，正在刷新签到状态"
             result["free_member_checkin"]["message"] = message
             return {
                 "success": True,
@@ -1323,15 +1335,15 @@ class DailyBenefitsTasks:
                 "signed_now": True
             }
 
-        message = sign_in_result.get("error", "鎵撳崱绛惧埌澶辫触")
+        message = sign_in_result.get("error", "打卡签到失败")
         if (
             sign_in_result.get("error_type") == "token_expired"
             or self._is_auth_expired_message(message)
         ):
             result["auth_expired"] = True
-            message = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+            message = "Token已过期，请重新登录"
         checkin_logger.info(
-            "鎵撳崱澶辫触鍝嶅簲璇婃柇: %s",
+            "打卡失败响应诊断: %s",
             self._format_diagnostics({
                 "message": message,
                 "response_data": sign_in_result.get("data", {}),
@@ -1353,8 +1365,8 @@ class DailyBenefitsTasks:
         account_name: str,
         result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """澶勭悊澶╁ぉ鎶藉妯″潡"""
-        lottery_logger = bind_logger(self.logger, account=account_name, step="澶╁ぉ鎶藉")
+        """处理天天抽奖模块"""
+        lottery_logger = bind_logger(self.logger, account=account_name, step="天天抽奖")
         daily_lottery_result = api.get_daily_lottery_info(page_info)
         if not daily_lottery_result["success"]:
             message = daily_lottery_result["error"]
@@ -1378,7 +1390,7 @@ class DailyBenefitsTasks:
         ]
 
         if remain_times <= 0:
-            message = "澶╁ぉ鎶藉鏃犲墿浣欐鏁?
+            message = "天天抽奖无剩余次数"
             result["daily_lottery"]["message"] = message
             return {
                 "success": True,
@@ -1386,14 +1398,14 @@ class DailyBenefitsTasks:
             }
 
         lottery_logger.info(
-            "鍓╀綑鎶藉娆℃暟=%s锛屽紑濮嬫墽琛屾娊濂?,
+            "剩余抽奖次数=%s，开始执行抽奖",
             remain_times
         )
 
         for index in range(1, remain_times + 1):
             if index > 1:
                 delay = random.uniform(1, 2)
-                lottery_logger.info("绛夊緟 %.1f 绉掑悗缁х画鎶藉", delay)
+                lottery_logger.info("等待 %.1f 秒后继续抽奖", delay)
                 time.sleep(delay)
 
             lottery_exec_result = api.exec_daily_lottery(
@@ -1408,23 +1420,23 @@ class DailyBenefitsTasks:
                 "success": lottery_exec_result["success"],
                 "reward_name": lottery_exec_result.get("reward_name", ""),
                 "reward_type": lottery_exec_result.get("reward_type", ""),
-                "message": lottery_exec_result.get("error") or lottery_exec_result.get("reward_name") or "鎶藉鎴愬姛"
+                "message": lottery_exec_result.get("error") or lottery_exec_result.get("reward_name") or "抽奖成功"
             }
             result["daily_lottery"]["attempts"].append(attempt)
 
             if lottery_exec_result["success"]:
-                lottery_logger.info("绗?%s 娆℃娊濂栨垚鍔? %s", index, attempt["reward_name"])
+                lottery_logger.info("第 %s 次抽奖成功: %s", index, attempt["reward_name"])
             else:
-                lottery_logger.error("绗?%s 娆℃娊濂栧け璐? %s", index, attempt["message"])
+                lottery_logger.error("第 %s 次抽奖失败: %s", index, attempt["message"])
                 if (
                     lottery_exec_result.get("error_type") == "token_expired"
                     or self._is_auth_expired_message(attempt["message"])
                 ):
                     result["auth_expired"] = True
-                    result["daily_lottery"]["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+                    result["daily_lottery"]["message"] = "Token已过期，请重新登录"
                     return {
                         "success": False,
-                        "message": "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+                        "message": "Token已过期，请重新登录"
                     }
                 break
 
@@ -1432,16 +1444,16 @@ class DailyBenefitsTasks:
         total_attempts = len(result["daily_lottery"]["attempts"])
 
         if total_attempts == 0:
-            message = "鏈墽琛屽ぉ澶╂娊濂?
+            message = "未执行天天抽奖"
             success = True
         elif success_count == total_attempts:
-            message = f"澶╁ぉ鎶藉瀹屾垚锛屾垚鍔?{success_count} 娆?
+            message = f"天天抽奖完成，成功 {success_count} 次"
             success = True
         elif success_count > 0:
-            message = f"澶╁ぉ鎶藉閮ㄥ垎鎴愬姛锛屾垚鍔?{success_count}/{total_attempts} 娆?
+            message = f"天天抽奖部分成功，成功 {success_count}/{total_attempts} 次"
             success = True
         else:
-            message = f"澶╁ぉ鎶藉澶辫触锛屽叡灏濊瘯 {total_attempts} 娆?
+            message = f"天天抽奖失败，共尝试 {total_attempts} 次"
             success = False
 
         if success_count > 0:
@@ -1452,7 +1464,7 @@ class DailyBenefitsTasks:
                 result=result
             )
             if reward_claim_status["message"]:
-                message = f"{message}锛寋reward_claim_status['message']}"
+                message = f"{message}，{reward_claim_status['message']}"
             success = success and reward_claim_status["success"]
 
         result["daily_lottery"]["message"] = message
@@ -1473,8 +1485,8 @@ class DailyBenefitsTasks:
         fragment_result: Optional[Dict[str, Any]] = None,
         include_skip_message: bool = False
     ) -> Dict[str, Any]:
-        """褰撳墠椤甸潰宸叉弧瓒崇 7 澶╂潯浠舵椂棰嗗彇濂栧姳銆?""
-        claim_logger = bind_logger(self.logger, account=account_name, step="绗?澶╁鍔?)
+        """当前页面已满足第 7 天条件时领取奖励。"""
+        claim_logger = bind_logger(self.logger, account=account_name, step="第7天奖励")
         reward_claim = result["daily_lottery"].setdefault(
             "reward_claim",
             {
@@ -1486,7 +1498,7 @@ class DailyBenefitsTasks:
 
         lottery_result = api.get_daily_lottery_info(page_info)
         if not lottery_result["success"]:
-            message = f"绗?澶╁鍔辩姸鎬佽В鏋愬け璐? {lottery_result['error']}"
+            message = f"第7天奖励状态解析失败: {lottery_result['error']}"
             reward_claim["message"] = message
             return {
                 "success": False,
@@ -1497,7 +1509,7 @@ class DailyBenefitsTasks:
         if fragment_result is None:
             fragment_result = api.get_fragment_collect_info(page_info)
         if not fragment_result["success"]:
-            message = f"绗?澶╁鍔辩鍒扮姸鎬佽В鏋愬け璐? {fragment_result['error']}"
+            message = f"第7天奖励签到状态解析失败: {fragment_result['error']}"
             reward_claim["message"] = message
             return {
                 "success": False,
@@ -1510,7 +1522,7 @@ class DailyBenefitsTasks:
         if not force_claim and sign_day != 7:
             message = ""
             if include_skip_message and sign_day > 0:
-                message = f"褰撳墠绛惧埌绗?{sign_day} 澶╋紝鏈埌绗?7 澶╅鍙栨潯浠?
+                message = f"当前签到第 {sign_day} 天，未到第 7 天领取条件"
             return {
                 "success": True,
                 "message": message,
@@ -1518,7 +1530,7 @@ class DailyBenefitsTasks:
             }
 
         reward_claim["attempted"] = True
-        claim_logger.info("褰撳墠绛惧埌绗?7 澶╋紝寮€濮嬮鍙栧鍔?)
+        claim_logger.info("当前签到第 7 天，开始领取奖励")
         receive_result = api.receive_daily_lottery_reward(
             portal_info=portal_result,
             component_number=fragment_result["component_number"],
@@ -1530,7 +1542,7 @@ class DailyBenefitsTasks:
             reward_name = receive_result.get("reward_name", "")
             message = receive_result.get("reason")
             if not message:
-                message = f"绗?澶╁鍔遍鍙栨垚鍔? {reward_name}" if reward_name else "绗?澶╁鍔遍鍙栨垚鍔?
+                message = f"第7天奖励领取成功: {reward_name}" if reward_name else "第7天奖励领取成功"
             reward_claim["success"] = True
             reward_claim["message"] = message
             return {
@@ -1539,15 +1551,15 @@ class DailyBenefitsTasks:
                 "claimed": True
             }
 
-        message = receive_result.get("error", "绗?澶╁鍔遍鍙栧け璐?)
+        message = receive_result.get("error", "第7天奖励领取失败")
         if (
             receive_result.get("error_type") == "token_expired"
             or self._is_auth_expired_message(message)
         ):
             result["auth_expired"] = True
-            message = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+            message = "Token已过期，请重新登录"
         claim_logger.info(
-            "绗?澶╁鍔遍鍙栧け璐ヨ瘖鏂? %s",
+            "第7天奖励领取失败诊断: %s",
             self._format_diagnostics({
                 "message": message,
                 "response_data": receive_result.get("data", {}),
@@ -1570,8 +1582,8 @@ class DailyBenefitsTasks:
         account_name: str,
         result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """鍒锋柊绛惧埌澶╂暟锛屽苟鍦ㄧ 7 澶╅鍙栧鍔便€?""
-        claim_logger = bind_logger(self.logger, account=account_name, step="绗?澶╁鍔?)
+        """刷新签到天数，并在第 7 天领取奖励。"""
+        claim_logger = bind_logger(self.logger, account=account_name, step="第7天奖励")
         reward_claim = result["daily_lottery"].setdefault(
             "reward_claim",
             {
@@ -1583,7 +1595,7 @@ class DailyBenefitsTasks:
 
         refreshed_page_info_result = api.get_page_info(portal_result)
         if not refreshed_page_info_result["success"]:
-            message = f"鍒锋柊绛惧埌澶╂暟澶辫触: {refreshed_page_info_result['error']}"
+            message = f"刷新签到天数失败: {refreshed_page_info_result['error']}"
             reward_claim["message"] = message
             return {
                 "success": False,
@@ -1592,7 +1604,7 @@ class DailyBenefitsTasks:
 
         refreshed_lottery_result = api.get_daily_lottery_info(refreshed_page_info_result["data"])
         if not refreshed_lottery_result["success"]:
-            message = f"鍒锋柊鍚庣殑绛惧埌澶╂暟瑙ｆ瀽澶辫触: {refreshed_lottery_result['error']}"
+            message = f"刷新后的签到天数解析失败: {refreshed_lottery_result['error']}"
             reward_claim["message"] = message
             return {
                 "success": False,
@@ -1600,7 +1612,7 @@ class DailyBenefitsTasks:
             }
         refreshed_fragment_result = api.get_fragment_collect_info(refreshed_page_info_result["data"])
         if not refreshed_fragment_result["success"]:
-            message = f"鍒锋柊鍚庣殑棰嗗彇缁勪欢瑙ｆ瀽澶辫触: {refreshed_fragment_result['error']}"
+            message = f"刷新后的领取组件解析失败: {refreshed_fragment_result['error']}"
             reward_claim["message"] = message
             return {
                 "success": False,
@@ -1618,11 +1630,11 @@ class DailyBenefitsTasks:
                 }
             return {
                 "success": True,
-                "message": f"褰撳墠绛惧埌绗?{signed_days} 澶╋紝鏈埌绗?7 澶╅鍙栨潯浠?
+                "message": f"当前签到第 {signed_days} 天，未到第 7 天领取条件"
             }
 
         reward_claim["attempted"] = True
-        claim_logger.info("褰撳墠绛惧埌绗?7 澶╋紝寮€濮嬮鍙栧鍔?)
+        claim_logger.info("当前签到第 7 天，开始领取奖励")
         receive_result = api.receive_daily_lottery_reward(
             portal_info=portal_result,
             component_number=refreshed_fragment_result["component_number"],
@@ -1634,7 +1646,7 @@ class DailyBenefitsTasks:
             reward_name = receive_result.get("reward_name", "")
             message = receive_result.get("reason")
             if not message:
-                message = f"绗?澶╁鍔遍鍙栨垚鍔? {reward_name}" if reward_name else "绗?澶╁鍔遍鍙栨垚鍔?
+                message = f"第7天奖励领取成功: {reward_name}" if reward_name else "第7天奖励领取成功"
             reward_claim["success"] = True
             reward_claim["message"] = message
             return {
@@ -1642,15 +1654,15 @@ class DailyBenefitsTasks:
                 "message": message
             }
 
-        message = receive_result.get("error", "绗?澶╁鍔遍鍙栧け璐?)
+        message = receive_result.get("error", "第7天奖励领取失败")
         if (
             receive_result.get("error_type") == "token_expired"
             or self._is_auth_expired_message(message)
         ):
             result["auth_expired"] = True
-            message = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
+            message = "Token已过期，请重新登录"
         claim_logger.info(
-            "绗?澶╁鍔遍鍙栧け璐ヨ瘖鏂? %s",
+            "第7天奖励领取失败诊断: %s",
             self._format_diagnostics({
                 "message": message,
                 "response_data": receive_result.get("data", {}),
@@ -1666,8 +1678,8 @@ class DailyBenefitsTasks:
         }
 
     def process_account(self, account_info: Dict[str, Any]) -> Dict[str, Any]:
-        """澶勭悊鍗曚釜璐﹀彿鐨勫ぉ澶╅绂忓埄浠诲姟"""
-        account_name = account_info.get("account_name", "鏈懡鍚嶈处鍙?)
+        """处理单个账号的天天领福利任务"""
+        account_name = account_info.get("account_name", "未命名账号")
         account_logger = bind_logger(self.logger, account=account_name)
         log_page_switch(account_logger, self.page_name)
 
@@ -1711,7 +1723,7 @@ class DailyBenefitsTasks:
         cookies = account_info.get("cookies", "")
         user_agent = account_info.get("user_agent")
         if not cookies:
-            result["message"] = "璐﹀彿閰嶇疆涓己灏?cookies"
+            result["message"] = "账号配置中缺少 cookies"
             account_logger.error(result["message"])
             return result
 
@@ -1725,8 +1737,8 @@ class DailyBenefitsTasks:
                 or self._is_auth_expired_message(result["message"])
             ):
                 result["auth_expired"] = True
-                result["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
-            log_task_result(account_logger, "馃搷 鍏ュ彛鍙戠幇", f"鉂?{result['message']}")
+                result["message"] = "Token已过期，请重新登录"
+            log_task_result(account_logger, "📍 入口发现", f"❌ {result['message']}")
             return result
 
         result["portal_info"] = {
@@ -1737,8 +1749,8 @@ class DailyBenefitsTasks:
         }
         log_task_result(
             account_logger,
-            "馃搷 鍏ュ彛鍙戠幇",
-            f"鉁?{portal_result.get('position') or portal_result.get('title') or '鏈煡鍏ュ彛'} "
+            "📍 入口发现",
+            f"✅ {portal_result.get('position') or portal_result.get('title') or '未知入口'} "
             f"({portal_result['activity_number']})"
         )
         page_info_result = api.get_page_info(portal_result)
@@ -1749,8 +1761,8 @@ class DailyBenefitsTasks:
                 or self._is_auth_expired_message(result["message"])
             ):
                 result["auth_expired"] = True
-                result["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
-            log_task_result(account_logger, "馃搷 鍏ュ彛鍙戠幇", f"鉂?{result['message']}")
+                result["message"] = "Token已过期，请重新登录"
+            log_task_result(account_logger, "📍 入口发现", f"❌ {result['message']}")
             return result
 
         current_page_info = page_info_result["data"]
@@ -1773,8 +1785,8 @@ class DailyBenefitsTasks:
                 result["message"] = pending_reward_status["message"]
                 result["daily_lottery"]["message"] = pending_reward_status["message"]
                 if result["auth_expired"]:
-                    result["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
-                log_task_result(account_logger, "馃弳 绗?澶╁鍔?, f"鉂?{result['message']}")
+                    result["message"] = "Token已过期，请重新登录"
+                log_task_result(account_logger, "🏆 第7天奖励", f"❌ {result['message']}")
                 return result
 
             if pending_reward_status["claimed"]:
@@ -1784,9 +1796,9 @@ class DailyBenefitsTasks:
                 else:
                     refresh_error = refreshed_page_info_result["error"]
                     result["success"] = False
-                    result["message"] = f"{pending_reward_status['message']}锛屼絾鍒锋柊椤甸潰淇℃伅澶辫触: {refresh_error}"
+                    result["message"] = f"{pending_reward_status['message']}，但刷新页面信息失败: {refresh_error}"
                     result["daily_lottery"]["message"] = result["message"]
-                    log_task_result(account_logger, "馃弳 绗?澶╁鍔?, f"鉂?{result['message']}")
+                    log_task_result(account_logger, "🏆 第7天奖励", f"❌ {result['message']}")
                     return result
 
         fragment_collect_status = self._process_fragment_collect_sign_in(
@@ -1817,8 +1829,8 @@ class DailyBenefitsTasks:
                     fragment_collect_status = {
                         "success": False,
                         "message": (
-                            f"{fragment_collect_status['message']}锛?
-                            f"浣嗗埛鏂板悗鐨勭鍒扮姸鎬佽В鏋愬け璐? {refresh_error}"
+                            f"{fragment_collect_status['message']}，"
+                            f"但刷新后的签到状态解析失败: {refresh_error}"
                         )
                     }
                     result["free_member_checkin"]["message"] = fragment_collect_status["message"]
@@ -1826,14 +1838,14 @@ class DailyBenefitsTasks:
                 refresh_error = refreshed_page_info_result["error"]
                 fragment_collect_status = {
                     "success": False,
-                    "message": f"{fragment_collect_status['message']}锛屼絾鍒锋柊椤甸潰淇℃伅澶辫触: {refresh_error}"
+                    "message": f"{fragment_collect_status['message']}，但刷新页面信息失败: {refresh_error}"
                 }
                 result["free_member_checkin"]["message"] = fragment_collect_status["message"]
 
         if result["auth_expired"]:
             result["success"] = False
-            result["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
-            log_task_result(account_logger, "馃搮 鎵撳崱绛惧埌", "鉂?Token宸茶繃鏈?)
+            result["message"] = "Token已过期，请重新登录"
+            log_task_result(account_logger, "📅 打卡签到", "❌ Token已过期")
             return result
 
         member_trial_status = self._process_member_trial(
@@ -1845,8 +1857,8 @@ class DailyBenefitsTasks:
         )
         if result["auth_expired"]:
             result["success"] = False
-            result["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
-            log_task_result(account_logger, "馃巵 浼氬憳璇曠敤", "鉂?Token宸茶繃鏈?)
+            result["message"] = "Token已过期，请重新登录"
+            log_task_result(account_logger, "🎁 会员试用", "❌ Token已过期")
             return result
         daily_lottery_status = self._process_daily_lottery(
             api=api,
@@ -1857,8 +1869,8 @@ class DailyBenefitsTasks:
         )
         if result["auth_expired"]:
             result["success"] = False
-            result["message"] = "Token宸茶繃鏈燂紝璇烽噸鏂扮櫥褰?
-            log_task_result(account_logger, "馃幇 澶╁ぉ鎶藉", "鉂?Token宸茶繃鏈?)
+            result["message"] = "Token已过期，请重新登录"
+            log_task_result(account_logger, "🎰 天天抽奖", "❌ Token已过期")
             return result
 
         result["success"] = (
@@ -1874,40 +1886,40 @@ class DailyBenefitsTasks:
                 daily_lottery_status["message"]
             ]
             if message
-        ) or "澶勭悊瀹屾垚"
+        ) or "处理完成"
 
         checkin_message = result["free_member_checkin"].get("message", "")
         trial_message = result["member_trial"].get("message", "")
         lottery_message = result["daily_lottery"].get("message", "")
 
         if checkin_message:
-            checkin_status = "鉁? if "鎴愬姛" in checkin_message or "宸茬鍒? in checkin_message else "鉂?
-            if "鏃? in checkin_message or "宸茬鍒? in checkin_message:
-                checkin_status = "鈴? if "鏃? in checkin_message else "鉁?
-            log_task_result(account_logger, "馃搮 鎵撳崱绛惧埌", f"{checkin_status} {checkin_message}")
+            checkin_status = "✅" if "成功" in checkin_message or "已签到" in checkin_message else "❌"
+            if "无" in checkin_message or "已签到" in checkin_message:
+                checkin_status = "⏭" if "无" in checkin_message else "✅"
+            log_task_result(account_logger, "📅 打卡签到", f"{checkin_status} {checkin_message}")
 
         if trial_message:
-            trial_status = "鉁? if "鎴愬姛" in trial_message else "鉂?
-            if "鏃? in trial_message or "宸茶揪涓婇檺" in trial_message or "鏃犻渶閲嶅" in trial_message:
-                trial_status = "鈴?
-            log_task_result(account_logger, "馃巵 浼氬憳璇曠敤", f"{trial_status} {trial_message}")
+            trial_status = "✅" if "成功" in trial_message else "❌"
+            if "无" in trial_message or "已达上限" in trial_message or "无需重复" in trial_message:
+                trial_status = "⏭"
+            log_task_result(account_logger, "🎁 会员试用", f"{trial_status} {trial_message}")
 
         if lottery_message:
-            lottery_status = "鉁? if "鎴愬姛" in lottery_message else "鉂?
-            if "鏃? in lottery_message:
-                lottery_status = "鈴?
-            log_task_result(account_logger, "馃幇 澶╁ぉ鎶藉", f"{lottery_status} {lottery_message}")
+            lottery_status = "✅" if "成功" in lottery_message else "❌"
+            if "无" in lottery_message:
+                lottery_status = "⏭"
+            log_task_result(account_logger, "🎰 天天抽奖", f"{lottery_status} {lottery_message}")
 
         return result
 
     def run(self) -> None:
-        """鎵ц鎵€鏈夎处鍙蜂换鍔?""
+        """执行所有账号任务"""
         self.logger.info("%s", "=" * 60)
-        self.logger.info("WPS 澶╁ぉ棰嗙鍒╀换鍔″紑濮?)
+        self.logger.info("WPS 天天领福利任务开始")
         self.logger.info("%s", "=" * 60)
 
         if not self.accounts:
-            self.logger.warning("娌℃湁鍙鐞嗙殑 WPS 璐﹀彿")
+            self.logger.warning("没有可处理的 WPS 账号")
             return
 
         for index, account_info in enumerate(self.accounts):
@@ -1915,7 +1927,7 @@ class DailyBenefitsTasks:
 
             if index < len(self.accounts) - 1:
                 delay = random.uniform(3, 8)
-                self.logger.info("鈴憋笍  绛夊緟 %.1f 绉掑悗澶勭悊涓嬩竴涓处鍙?..", delay)
+                self.logger.info("⏱️  等待 %.1f 秒后处理下一个账号...", delay)
                 time.sleep(delay)
 
         self._print_summary()
@@ -1924,63 +1936,63 @@ class DailyBenefitsTasks:
 
     @staticmethod
     def build_notification_lines(item: Dict[str, Any]) -> List[str]:
-        """鏋勯€犲崟璐﹀彿澶╁ぉ棰嗙鍒╅€氱煡鍐呭銆?""
+        """构造单账号天天领福利通知内容。"""
         lines = [f"    [{DailyBenefitsTasks.page_name}] {item.get('message', '')}"]
 
         free_member_checkin = item.get("free_member_checkin", {})
         if free_member_checkin.get("message"):
-            lines.append(f"      鎵撳崱鍏嶈垂棰嗕細鍛? {free_member_checkin.get('message', '')}")
+            lines.append(f"      打卡免费领会员: {free_member_checkin.get('message', '')}")
 
         member_trial = item.get("member_trial", {})
-        lines.append(f"      鍓╀綑璇曠敤鐢宠娆℃暟: {member_trial.get('remain_times', 0)}")
+        lines.append(f"      剩余试用申请次数: {member_trial.get('remain_times', 0)}")
         attempts = member_trial.get("attempts", [])
         if attempts:
-            lines.append("      璇曠敤鐢宠缁撴灉:")
+            lines.append("      试用申请结果:")
             for attempt in attempts:
-                attempt_status = "鎴愬姛" if attempt["success"] else "澶辫触"
+                attempt_status = "成功" if attempt["success"] else "失败"
                 lines.append(f"        {attempt_status} - {attempt['title']}: {attempt['message']}")
 
         daily_lottery = item.get("daily_lottery", {})
-        lines.append(f"      鍓╀綑鎶藉娆℃暟: {daily_lottery.get('remain_times', 0)}")
+        lines.append(f"      剩余抽奖次数: {daily_lottery.get('remain_times', 0)}")
         if daily_lottery.get("sign_day"):
-            lines.append(f"      褰撳墠绛惧埌澶╂暟: 绗?{daily_lottery.get('sign_day')} 澶?)
+            lines.append(f"      当前签到天数: 第 {daily_lottery.get('sign_day')} 天")
         lottery_attempts = daily_lottery.get("attempts", [])
         if lottery_attempts:
-            lines.append("      鎶藉缁撴灉:")
+            lines.append("      抽奖结果:")
             for attempt in lottery_attempts:
-                attempt_status = "鎴愬姛" if attempt["success"] else "澶辫触"
-                lines.append(f"        绗瑊attempt['index']}娆?{attempt_status}: {attempt['message']}")
+                attempt_status = "成功" if attempt["success"] else "失败"
+                lines.append(f"        第{attempt['index']}次 {attempt_status}: {attempt['message']}")
         reward_claim = daily_lottery.get("reward_claim", {})
         if reward_claim.get("message"):
-            claim_status = "鎴愬姛" if reward_claim.get("success") else "澶辫触"
+            claim_status = "成功" if reward_claim.get("success") else "失败"
             if not reward_claim.get("attempted"):
-                claim_status = "璺宠繃"
-            lines.append(f"      绗?澶╁鍔遍鍙? {claim_status} - {reward_claim.get('message', '')}")
+                claim_status = "跳过"
+            lines.append(f"      第7天奖励领取: {claim_status} - {reward_claim.get('message', '')}")
 
         return lines
 
     def _print_summary(self) -> None:
-        """鎵撳嵃浠诲姟缁熻"""
+        """打印任务统计"""
         self.logger.info("%s", "=" * 60)
-        self.logger.info("鎵ц缁撴灉缁熻")
+        self.logger.info("执行结果统计")
         self.logger.info("%s", "=" * 60)
 
         total = len(self.account_results)
         success = sum(1 for item in self.account_results if item["success"])
         failed = total - success
 
-        self.logger.info("鎬昏处鍙锋暟: %s", total)
-        self.logger.info("鎵ц鎴愬姛: %s", success)
-        self.logger.info("鎵ц澶辫触: %s", failed)
+        self.logger.info("总账号数: %s", total)
+        self.logger.info("执行成功: %s", success)
+        self.logger.info("执行失败: %s", failed)
 
         for item in self.account_results:
-            status = "鉁?鎴愬姛" if item["success"] else "鉂?澶辫触"
+            status = "✅ 成功" if item["success"] else "❌ 失败"
             self.logger.info("%s: %s - %s", item["account_name"], status, item["message"])
 
         self.logger.info("%s", "=" * 60)
 
     def _send_notification(self) -> None:
-        """鍙戦€佺粨鏋滈€氱煡"""
+        """发送结果通知"""
         if not self.account_results:
             return
 
@@ -1989,61 +2001,61 @@ class DailyBenefitsTasks:
         failed = total - success
 
         content_lines = [
-            f"馃搳 鎬昏处鍙锋暟: {total}",
-            f"鉁?鎵ц鎴愬姛: {success}",
-            f"鉂?鎵ц澶辫触: {failed}",
+            f"📊 总账号数: {total}",
+            f"✅ 执行成功: {success}",
+            f"❌ 执行失败: {failed}",
             "",
-            "馃搵 璇︾粏缁撴灉:"
+            "📋 详细结果:"
         ]
 
         for item in self.account_results:
-            status = "鉁? if item["success"] else "鉂?
+            status = "✅" if item["success"] else "❌"
             content_lines.append(f"{status} {item['account_name']}: {item['message']}")
 
             portal_info = item.get("portal_info", {})
             if portal_info:
                 content_lines.append(
-                    f"    馃幆 娲诲姩椤? {portal_info.get('activity_number', '')} / {portal_info.get('page_number', '')}"
+                    f"    🎯 活动页: {portal_info.get('activity_number', '')} / {portal_info.get('page_number', '')}"
                 )
 
             free_member_checkin = item.get("free_member_checkin", {})
             if free_member_checkin.get("message"):
-                content_lines.append(f"    馃搮 鎵撳崱鍏嶈垂棰嗕細鍛? {free_member_checkin.get('message', '')}")
+                content_lines.append(f"    📅 打卡免费领会员: {free_member_checkin.get('message', '')}")
 
             member_trial = item.get("member_trial", {})
             remain_times = member_trial.get("remain_times", 0)
-            content_lines.append(f"    馃啌 鍓╀綑璇曠敤鐢宠娆℃暟: {remain_times}")
+            content_lines.append(f"    🆓 剩余试用申请次数: {remain_times}")
 
             attempts = member_trial.get("attempts", [])
             if attempts:
-                content_lines.append("    馃摑 鐢宠缁撴灉:")
+                content_lines.append("    📝 申请结果:")
                 for attempt in attempts:
-                    attempt_status = "鎴愬姛" if attempt["success"] else "澶辫触"
+                    attempt_status = "成功" if attempt["success"] else "失败"
                     content_lines.append(
                         f"       {attempt_status} - {attempt['title']}: {attempt['message']}"
                     )
 
             daily_lottery = item.get("daily_lottery", {})
-            content_lines.append(f"    馃幇 鍓╀綑鎶藉娆℃暟: {daily_lottery.get('remain_times', 0)}")
+            content_lines.append(f"    🎰 剩余抽奖次数: {daily_lottery.get('remain_times', 0)}")
             if daily_lottery.get("sign_day"):
-                content_lines.append(f"    馃搯 褰撳墠绛惧埌澶╂暟: 绗?{daily_lottery.get('sign_day')} 澶?)
+                content_lines.append(f"    📆 当前签到天数: 第 {daily_lottery.get('sign_day')} 天")
 
             lottery_attempts = daily_lottery.get("attempts", [])
             if lottery_attempts:
-                content_lines.append("    馃巵 鎶藉缁撴灉:")
+                content_lines.append("    🎁 抽奖结果:")
                 for attempt in lottery_attempts:
-                    attempt_status = "鎴愬姛" if attempt["success"] else "澶辫触"
+                    attempt_status = "成功" if attempt["success"] else "失败"
                     content_lines.append(
-                        f"       绗瑊attempt['index']}娆?{attempt_status}: {attempt['message']}"
+                        f"       第{attempt['index']}次 {attempt_status}: {attempt['message']}"
                     )
 
             reward_claim = daily_lottery.get("reward_claim", {})
             if reward_claim.get("message"):
-                claim_status = "鎴愬姛" if reward_claim.get("success") else "澶辫触"
+                claim_status = "成功" if reward_claim.get("success") else "失败"
                 if not reward_claim.get("attempted"):
-                    claim_status = "璺宠繃"
+                    claim_status = "跳过"
                 content_lines.append(
-                    f"    馃弳 绗?澶╁鍔遍鍙? {claim_status} - {reward_claim.get('message', '')}"
+                    f"    🏆 第7天奖励领取: {claim_status} - {reward_claim.get('message', '')}"
                 )
 
             if item != self.account_results[-1]:
@@ -2051,24 +2063,24 @@ class DailyBenefitsTasks:
 
         try:
             send_notification(
-                title="WPS 澶╁ぉ棰嗙鍒╃粨鏋滈€氱煡",
+                title="WPS 天天领福利结果通知",
                 content="\n".join(content_lines),
                 sound=NotificationSound.BIRDSONG
             )
-            self.logger.info("鉁?鎺ㄩ€侀€氱煡宸插彂閫?)
+            self.logger.info("✅ 推送通知已发送")
         except Exception as exc:
-            self.logger.warning("鈿狅笍 鍙戦€佹帹閫侀€氱煡澶辫触: %s", exc)
+            self.logger.warning("⚠️ 发送推送通知失败: %s", exc)
 
 
 def main() -> None:
-    """涓诲嚱鏁?""
+    """主函数"""
     try:
         DailyBenefitsTasks().run()
     except FileNotFoundError as exc:
-        print(f"鉂?閿欒: {exc}")
+        print(f"❌ 错误: {exc}")
         sys.exit(1)
     except Exception as exc:
-        print(f"鉂?鍙戠敓鏈煡閿欒: {exc}")
+        print(f"❌ 发生未知错误: {exc}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
